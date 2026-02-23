@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 import torch_sim as ts
+from torch_sim._duecredit import dcite
 from torch_sim.integrators.md import (
     MDState,
     NoseHooverChain,
@@ -628,6 +629,7 @@ def npt_langevin_init(
     )
 
 
+@dcite("10.1063/1.4901303")
 def npt_langevin_step(
     state: NPTLangevinState,
     model: ModelInterface,
@@ -1432,6 +1434,7 @@ def npt_nose_hoover_init(
     )
 
 
+@dcite("10.1080/00268979600100761")
 def npt_nose_hoover_step(
     state: NPTNoseHooverState,
     model: ModelInterface,
@@ -1963,6 +1966,8 @@ def _crescale_isotropic_barostat_step(
     return state
 
 
+@dcite("10.1063/5.0020514")
+@dcite("10.3390/app12031139")
 def npt_crescale_anisotropic_step(
     state: NPTCRescaleState,
     model: ModelInterface,
@@ -2031,6 +2036,8 @@ def npt_crescale_anisotropic_step(
     return _vrescale_update(state, tau, kT, dt / 2)
 
 
+@dcite("10.1063/5.0020514")
+@dcite("10.3390/app12031139")
 def npt_crescale_independent_lengths_step(
     state: NPTCRescaleState,
     model: ModelInterface,
@@ -2099,6 +2106,8 @@ def npt_crescale_independent_lengths_step(
     return _vrescale_update(state, tau, kT, dt / 2)
 
 
+@dcite("10.1063/5.0020514")
+@dcite("10.3390/app12031139")
 def npt_crescale_average_anisotropic_step(
     state: NPTCRescaleState,
     model: ModelInterface,
@@ -2168,6 +2177,7 @@ def npt_crescale_average_anisotropic_step(
     return _vrescale_update(state, tau, kT, dt / 2)
 
 
+@dcite("10.1063/5.0020514")
 def npt_crescale_isotropic_step(
     state: NPTCRescaleState,
     model: ModelInterface,
