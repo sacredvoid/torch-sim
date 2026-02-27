@@ -11,8 +11,8 @@ from torch_sim.integrators.md import (
     MDState,
     NoseHooverChain,
     NoseHooverChainFns,
-    calculate_momenta,
     construct_nose_hoover_chain,
+    initialize_momenta,
     momentum_step,
     position_step,
     velocity_verlet_step,
@@ -68,7 +68,13 @@ def _ou_step(
     c2 = torch.sqrt(kT * (1 - torch.square(c1))).unsqueeze(-1)
 
     # Generate random noise from normal distribution
-    noise = torch.randn_like(state.momenta, device=state.device, dtype=state.dtype)
+    rng = state.rng
+    noise = torch.randn(
+        state.momenta.shape,
+        device=state.device,
+        dtype=state.dtype,
+        generator=rng,
+    )
     new_momenta = (
         c1.unsqueeze(-1) * state.momenta
         + c2 * torch.sqrt(state.masses).unsqueeze(-1) * noise
@@ -82,7 +88,6 @@ def nvt_langevin_init(
     model: ModelInterface,
     *,
     kT: float | torch.Tensor,
-    seed: int | None = None,
     **_kwargs: Any,
 ) -> MDState:
     """Initialize an NVT state from input data for Langevin dynamics.
@@ -91,6 +96,8 @@ def nvt_langevin_init(
     energies and forces, and sampling momenta from a Maxwell-Boltzmann distribution
     at the specified temperature.
 
+    To seed the RNG set ``state.rng = seed`` before calling.
+
     Args:
         model: Neural network model that computes energies and forces.
             Must return a dict with 'energy' and 'forces' keys.
@@ -98,7 +105,6 @@ def nvt_langevin_init(
             masses, cell, pbc, and other required state vars
         kT: Temperature in energy units for initializing momenta,
             either scalar or with shape [n_systems]
-        seed: Random seed for reproducibility
 
     Returns:
         MDState: Initialized state for NVT integration containing positions,
@@ -117,7 +123,9 @@ def nvt_langevin_init(
     momenta = getattr(
         state,
         "momenta",
-        calculate_momenta(state.positions, state.masses, state.system_idx, kT, seed),
+        initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT, state.rng
+        ),
     )
     return MDState.from_state(
         state,
@@ -247,7 +255,6 @@ def nvt_nose_hoover_init(
     chain_length: int = 3,
     chain_steps: int = 3,
     sy_steps: int = 3,
-    seed: int | None = None,
     **kwargs: Any,
 ) -> NVTNoseHooverState:
     """Initialize the NVT Nose-Hoover state.
@@ -256,6 +263,8 @@ def nvt_nose_hoover_init(
     thermostat. The Nose-Hoover chain provides deterministic temperature control by
     coupling the system to a chain of thermostats. The integration scheme is
     time-reversible and conserves an extended energy quantity.
+
+    To seed the RNG set ``state.rng = seed`` before calling.
 
     Args:
         state: Initial system state as SimState or dict
@@ -266,7 +275,6 @@ def nvt_nose_hoover_init(
         chain_length: Number of thermostats in Nose-Hoover chain (default: 3)
         chain_steps: Number of chain integration substeps (default: 3)
         sy_steps: Number of Suzuki-Yoshida steps - must be 1, 3, 5, or 7 (default: 3)
-        seed: Random seed for momenta initialization
         **kwargs: Additional state variables
 
     Returns:
@@ -294,7 +302,9 @@ def nvt_nose_hoover_init(
     model_output = model(state)
     momenta = kwargs.get(
         "momenta",
-        calculate_momenta(state.positions, state.masses, state.system_idx, kT, seed),
+        initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT, state.rng
+        ),
     )
 
     # Calculate initial kinetic energy per system
@@ -535,9 +545,10 @@ def _vrescale_update(
     KE_new = dof * kT_tensor / 2
 
     # Generate random numbers
-    r1 = torch.randn(n_systems, device=device, dtype=dtype)
-    # Sample Gamma((dof - 1)/2, 1/2) = \sum_2^{dof} X_i^2 where X_i ~ N(0,1)
-    r2 = torch.distributions.Gamma((dof - 1) / 2, torch.ones_like(dof) / 2).sample()
+    rng = state.rng
+    r1 = torch.randn(n_systems, device=device, dtype=dtype, generator=rng)
+    # Sample Gamma((dof - 1)/2, 1/2) via _standard_gamma so we can seed it
+    r2 = torch._standard_gamma((dof - 1) / 2, generator=rng) * 2  # noqa: SLF001
 
     # Calculate scaling coefficients
     c1 = torch.exp(-dt_tensor / tau_tensor)
@@ -557,7 +568,6 @@ def nvt_vrescale_init(
     model: ModelInterface,
     *,
     kT: float | torch.Tensor,
-    seed: int | None = None,
     **_kwargs: Any,
 ) -> NVTVRescaleState:
     """Initialize an NVT state from input data for velocity rescaling dynamics.
@@ -567,6 +577,8 @@ def nvt_vrescale_init(
     samples from the canonical ensemble by rescaling velocities with an
     appropriately chosen random factor.
 
+    To seed the RNG set ``state.rng = seed`` before calling.
+
     Args:
         model: Neural network model that computes energies and forces.
             Must return a dict with 'energy' and 'forces' keys.
@@ -574,7 +586,6 @@ def nvt_vrescale_init(
             masses, cell, pbc, and other required state vars
         kT: Temperature in energy units for initializing momenta,
             either scalar or with shape [n_systems]
-        seed: Random seed for reproducibility
 
     Returns:
         MDState: Initialized state for NVT integration containing positions,
@@ -593,7 +604,9 @@ def nvt_vrescale_init(
     momenta = getattr(
         state,
         "momenta",
-        calculate_momenta(state.positions, state.masses, state.system_idx, kT, seed),
+        initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT, state.rng
+        ),
     )
 
     return NVTVRescaleState.from_state(
@@ -629,7 +642,6 @@ def nvt_vrescale_step(
             with shape [n_systems]
         tau: Thermostat relaxation time controlling the coupling strength,
             either scalar or with shape [n_systems]. Defaults to 100*dt.
-        seed: Random seed for reproducibility
 
     Returns:
         MDState: Updated state after one complete V-Rescale step with new positions,

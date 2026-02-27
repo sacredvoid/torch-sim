@@ -32,6 +32,10 @@ class MDState(SimState):
         momenta (torch.Tensor): Particle momenta [n_particles, n_dim]
         energy (torch.Tensor): Potential energy of the system [n_systems]
         forces (torch.Tensor): Forces on particles [n_particles, n_dim]
+        rng (torch.Generator): RNG used by stochastic integrators (lazily
+            initialised via the ``rng`` property on ``SimState``).  Stored on
+            the state so that the random stream advances consistently across
+            steps and can be serialised for reproducibility.
 
     Properties:
         velocities (torch.Tensor): Particle velocities [n_particles, n_dim]
@@ -91,12 +95,12 @@ class MDState(SimState):
         )
 
 
-def calculate_momenta(
+def initialize_momenta(
     positions: torch.Tensor,
     masses: torch.Tensor,
     system_idx: torch.Tensor,
     kT: float | torch.Tensor,
-    seed: int | None = None,
+    generator: torch.Generator | None = None,
 ) -> torch.Tensor:
     """Initialize particle momenta based on temperature.
 
@@ -109,7 +113,7 @@ def calculate_momenta(
         masses (torch.Tensor): Particle masses [n_particles]
         system_idx (torch.Tensor): System indices [n_particles]
         kT (torch.Tensor): Temperature in energy units [n_systems]
-        seed (int, optional): Random seed for reproducibility. Defaults to None.
+        generator: Optional ``torch.Generator`` for reproducibility.
 
     Returns:
         torch.Tensor: Initialized momenta [n_particles, n_dim]
@@ -117,13 +121,8 @@ def calculate_momenta(
     device = positions.device
     dtype = positions.dtype
 
-    generator = torch.Generator(device=device)
-    if seed is not None:
-        generator.manual_seed(seed)
-
     kT = torch.as_tensor(kT, device=device, dtype=dtype)
     if kT.ndim > 0:
-        # kT is a tensor with shape (n_systems,)
         kT = kT[system_idx]
 
     # Generate random momenta from normal distribution

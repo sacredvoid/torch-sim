@@ -13,8 +13,8 @@ from torch_sim.integrators.md import (
     MDState,
     NoseHooverChain,
     NoseHooverChainFns,
-    calculate_momenta,
     construct_nose_hoover_chain,
+    initialize_momenta,
     momentum_step,
 )
 from torch_sim.integrators.nvt import _vrescale_update
@@ -106,7 +106,10 @@ def _npt_langevin_beta(
         torch.Tensor: Random noise term for force calculation [n_particles, n_dim]
     """
     # Generate system-specific noise with correct shape
-    noise = torch.randn_like(state.momenta)
+    rng = state.rng
+    noise = torch.randn(
+        state.momenta.shape, device=state.device, dtype=state.dtype, generator=rng
+    )
 
     # Calculate the thermal noise amplitude by system
     batch_kT = kT
@@ -149,7 +152,10 @@ def _npt_langevin_cell_beta(
             [n_systems, n_dimensions, n_dimensions]
     """
     # Generate standard normal distribution (zero mean, unit variance)
-    noise = torch.randn_like(state.cell_positions, device=state.device, dtype=state.dtype)
+    rng = state.rng
+    noise = torch.randn(
+        state.cell_positions.shape, device=state.device, dtype=state.dtype, generator=rng
+    )
 
     if kT.ndim == 0:
         kT = kT.expand(state.n_systems)
@@ -275,7 +281,13 @@ def _npt_langevin_cell_velocity_step(
     c_2 = dt_expanded * ((a * F_p_n) + pressure_force) / (2 * cell_masses_expanded)
 
     # Generate system-specific cell noise with correct shape (n_systems, 3, 3)
-    cell_noise = torch.randn_like(state.cell_velocities)
+    rng = state.rng
+    cell_noise = torch.randn(
+        state.cell_velocities.shape,
+        device=state.cell_velocities.device,
+        dtype=state.cell_velocities.dtype,
+        generator=rng,
+    )
 
     # Calculate thermal noise amplitude
     noise_prefactor = torch.sqrt(
@@ -350,7 +362,10 @@ def _npt_langevin_position_step(
     c_2 = (2 * L_n_new_atoms / (L_n_new_atoms + L_n_atoms)) * b * dt_atoms
 
     # Generate atom-specific noise
-    noise = torch.randn_like(state.momenta)
+    rng = state.rng
+    noise = torch.randn(
+        state.momenta.shape, device=state.device, dtype=state.dtype, generator=rng
+    )
     batch_kT = kT
     if kT.ndim == 0:
         batch_kT = kT.expand(state.n_systems)
@@ -415,7 +430,10 @@ def _npt_langevin_velocity_step(
     c_2 = dt_atoms.unsqueeze(-1) * ((a * forces) + state.forces) / M_2.unsqueeze(-1)
 
     # Generate atom-specific noise
-    noise = torch.randn_like(state.momenta)
+    rng = state.rng
+    noise = torch.randn(
+        state.momenta.shape, device=state.device, dtype=state.dtype, generator=rng
+    )
     batch_kT = kT
     if kT.ndim == 0:
         batch_kT = kT.expand(state.n_systems)
@@ -508,7 +526,6 @@ def npt_langevin_init(
     alpha: float | torch.Tensor | None = None,
     cell_alpha: float | torch.Tensor | None = None,
     b_tau: float | torch.Tensor | None = None,
-    seed: int | None = None,
     **_kwargs: Any,
 ) -> NPTLangevinState:
     """Initialize an NPT Langevin state from input data.
@@ -517,6 +534,8 @@ def npt_langevin_init(
     setting up all necessary variables including particle velocities,
     cell parameters, and barostat variables. It computes initial forces
     and stress using the provided model.
+
+    To seed the RNG set ``state.rng = seed`` before calling.
 
     Args:
         model (ModelInterface): Neural network model that computes energies, forces,
@@ -533,7 +552,6 @@ def npt_langevin_init(
         b_tau (torch.Tensor, optional): Barostat time constant controlling how quickly
             the system responds to pressure differences, either scalar or shape
             [n_systems]. Defaults to 1/(1000*dt).
-        seed (int, optional): Random seed for reproducibility. Defaults to None.
 
     Returns:
         NPTLangevinState: Initialized state for NPT Langevin integration containing
@@ -576,7 +594,9 @@ def npt_langevin_init(
     momenta = getattr(
         state,
         "momenta",
-        calculate_momenta(state.positions, state.masses, state.system_idx, kT, seed),
+        initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT, state.rng
+        ),
     )
 
     # Initialize cell parameters
@@ -1274,7 +1294,6 @@ def npt_nose_hoover_init(
     sy_steps: int = 3,
     t_tau: float | torch.Tensor | None = None,
     b_tau: float | torch.Tensor | None = None,
-    seed: int | None = None,
     **kwargs: Any,
 ) -> NPTNoseHooverState:
     """Initialize the NPT Nose-Hoover state.
@@ -1283,6 +1302,8 @@ def npt_nose_hoover_init(
     chain thermostats for both temperature and pressure control. It sets up the
     system with appropriate initial conditions including particle positions, momenta,
     cell variables, and thermostat chains.
+
+    To seed the RNG set ``state.rng = seed`` before calling.
 
     Args:
         model (ModelInterface): Model to compute forces and energies
@@ -1298,7 +1319,6 @@ def npt_nose_hoover_init(
             equilibrates. Defaults to 100*dt
         b_tau: Barostat relaxation time. Controls how quickly pressure equilibrates.
             Defaults to 1000*dt
-        seed: Random seed for momenta initialization. Used for reproducible runs
         **kwargs: Additional state variables like atomic_numbers or
             pre-initialized momenta
 
@@ -1368,7 +1388,9 @@ def npt_nose_hoover_init(
     # Initialize momenta
     momenta = kwargs.get(
         "momenta",
-        calculate_momenta(state.positions, state.masses, state.system_idx, kT, seed),
+        initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT, state.rng
+        ),
     )
 
     # Compute total DOF for thermostat initialization and a zero KE placeholder
@@ -1700,7 +1722,12 @@ def _crescale_anisotropic_barostat_step(
     prefactor = state.isothermal_compressibility * sqrt_vol / (2 * state.tau_p)
     change_sqrt_vol = -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt / 2 + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt / 2 + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=state.rng,
+    )
     new_sqrt_volume = sqrt_vol + change_sqrt_vol
     ## Step 2: compute deformation matrix
     prefactor_random_matrix = (
@@ -1721,6 +1748,7 @@ def _crescale_anisotropic_barostat_step(
         3,
         device=state.positions.device,
         dtype=state.positions.dtype,
+        generator=state.rng,
     )
     random_matrix_tilde = random_matrix - torch.einsum("bii->b", random_matrix)[
         :, None, None
@@ -1735,7 +1763,12 @@ def _crescale_anisotropic_barostat_step(
     ## Step 3: propagate sqrt(volume) for dt/2
     new_sqrt_volume += -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt / 2 + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt / 2 + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=state.rng,
+    )
     rscaling = deformation_matrix * torch.pow((new_sqrt_volume / sqrt_vol), 2 / 3).view(
         -1, 1, 1
     )
@@ -1772,9 +1805,15 @@ def _crescale_independent_lengths_barostat_step(
         kT * state.isothermal_compressibility * dt / (4 * state.tau_p)
     )
     prefactor = state.isothermal_compressibility * sqrt_vol / (2 * state.tau_p)
+    rng = state.rng
     change_sqrt_vol = -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt / 2 + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt / 2 + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=rng,
+    )
     new_sqrt_volume = sqrt_vol + change_sqrt_vol
     ## Step 2: compute deformation matrix
     prefactor_random_matrix = (
@@ -1792,6 +1831,7 @@ def _crescale_independent_lengths_barostat_step(
         3,
         device=state.positions.device,
         dtype=state.positions.dtype,
+        generator=rng,
     )
     random_matrix_tilde = random_matrix - torch.mean(random_matrix, dim=1, keepdim=True)
     deformation_matrix = torch.exp(
@@ -1801,7 +1841,12 @@ def _crescale_independent_lengths_barostat_step(
     ## Step 3: propagate sqrt(volume) for dt/2
     new_sqrt_volume += -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt / 2 + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt / 2 + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=rng,
+    )
     rscaling = deformation_matrix * torch.pow(
         (new_sqrt_volume / sqrt_vol), 2 / 3
     ).unsqueeze(-1)
@@ -1865,9 +1910,15 @@ def _crescale_average_anisotropic_barostat_step(
         kT * state.isothermal_compressibility * dt / (4 * state.tau_p)
     )
     prefactor = state.isothermal_compressibility * sqrt_vol / (2 * state.tau_p)
+    rng = state.rng
     change_sqrt_vol = -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt / 2 + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt / 2 + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=rng,
+    )
     new_sqrt_volume = sqrt_vol + change_sqrt_vol
     ## Step 2: compute deformation matrix
     prefactor_random_matrix = (
@@ -1888,6 +1939,7 @@ def _crescale_average_anisotropic_barostat_step(
         3,
         device=state.positions.device,
         dtype=state.positions.dtype,
+        generator=rng,
     )
     random_matrix_tilde = random_matrix - torch.einsum("bii->b", random_matrix)[
         :, None, None
@@ -1902,7 +1954,12 @@ def _crescale_average_anisotropic_barostat_step(
     ## Step 3: propagate sqrt(volume) for dt/2
     new_sqrt_volume += -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt / 2 + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt / 2 + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=rng,
+    )
     rscaling = deformation_matrix * torch.pow((new_sqrt_volume / sqrt_vol), 2 / 3).view(
         -1, 1, 1
     )
@@ -1943,9 +2000,15 @@ def _crescale_isotropic_barostat_step(
         kT * state.isothermal_compressibility * dt / (4 * state.tau_p)
     )
     prefactor = state.isothermal_compressibility * sqrt_vol / (2 * state.tau_p)
+    rng = state.rng
     change_sqrt_vol = -prefactor * (
         external_pressure - trace_P_int / 3 - kT / (2 * volume)
-    ) * dt + prefactor_random * torch.randn_like(sqrt_vol)
+    ) * dt + prefactor_random * torch.randn(
+        sqrt_vol.shape,
+        device=sqrt_vol.device,
+        dtype=sqrt_vol.dtype,
+        generator=rng,
+    )
     new_sqrt_volume = sqrt_vol + change_sqrt_vol
 
     # Update positions and momenta (barostat + half momentum step)
@@ -2272,7 +2335,6 @@ def npt_crescale_init(
     dt: float | torch.Tensor,
     tau_p: float | torch.Tensor | None = None,
     isothermal_compressibility: float | torch.Tensor | None = None,
-    seed: int | None = None,
 ) -> NPTCRescaleState:
     """Initialize the NPT cell rescaling state.
 
@@ -2283,6 +2345,8 @@ def npt_crescale_init(
     Only allow isotropic external stress, but can run both isotropic and
     anisotropic cell rescaling.
 
+    To seed the RNG set ``state.rng = seed`` before calling.
+
     Args:
         state: Initial system state as MDState or dict containing positions, masses,
             cell, and PBC information
@@ -2291,7 +2355,6 @@ def npt_crescale_init(
         dt: Integration timestep
         tau_p: Barostat relaxation time. Controls how quickly pressure equilibrates.
         isothermal_compressibility: Isothermal compressibility of the system.
-        seed: Random seed for momenta initialization.
     """
     device, dtype = model.device, model.dtype
 
@@ -2324,7 +2387,9 @@ def npt_crescale_init(
     momenta = getattr(
         state,
         "momenta",
-        calculate_momenta(state.positions, state.masses, state.system_idx, kT, seed),
+        initialize_momenta(
+            state.positions, state.masses, state.system_idx, kT, state.rng
+        ),
     )
 
     # Create the initial state
